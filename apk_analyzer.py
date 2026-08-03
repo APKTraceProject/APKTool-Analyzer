@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Callable
 
 ANDROID_NS = "http://schemas.android.com/apk/res/android"
 
@@ -105,7 +105,7 @@ def validate_paths(config: Dict[str, Any]) -> Tuple[Path, Path, Path]:
     apk_path = Path(config["apk_path"]).expanduser().resolve()
     output_dir = Path(config["output_dir"]).expanduser().resolve()
 
-    if not apktool_path.exists():
+    if not apktool_path.exists() and shutil.which("apktool") is None:
         raise FileNotFoundError(f"Apktool was not found: {apktool_path}")
     if not apk_path.exists():
         raise FileNotFoundError(f"APK file was not found: {apk_path}")
@@ -119,7 +119,9 @@ def validate_paths(config: Dict[str, Any]) -> Tuple[Path, Path, Path]:
 def build_apktool_command(apktool_path: Path, apk_path: Path, output_path: Path) -> List[str]:
     if apktool_path.suffix.lower() == ".jar":
         return ["java", "-jar", str(apktool_path), "d", "-f", str(apk_path), "-o", str(output_path)]
-    return [str(apktool_path), "d", "-f", str(apk_path), "-o", str(output_path)]
+    if apktool_path.exists():
+        return [str(apktool_path), "d", "-f", str(apk_path), "-o", str(output_path)]
+    return ["apktool", "d", "-f", str(apk_path), "-o", str(output_path)]
 
 
 def run_apktool(apktool_path: Path, apk_path: Path, output_path: Path) -> None:
@@ -142,9 +144,8 @@ def run_apktool(apktool_path: Path, apk_path: Path, output_path: Path) -> None:
             raise RuntimeError("Java was not found. Make sure Java is installed and available in PATH.") from exc
         raise RuntimeError(f"Could not execute Apktool: {apktool_path}") from exc
 
-    print(result.stdout)
     if result.returncode != 0:
-        raise RuntimeError(f"Apktool failed with exit code {result.returncode}")
+        raise RuntimeError(f"Apktool failed with exit code {result.returncode}:\n{result.stdout}")
 
 
 def get_android_attribute(element: ET.Element, name: str) -> Optional[str]:
@@ -641,6 +642,75 @@ def save_json(data: Dict[str, Any], output_path: Path) -> None:
         json.dump(data, file, indent=4, ensure_ascii=False)
 
 
+def run_analysis_pipeline(
+    apk_path_str: str,
+    output_dir_str: Optional[str] = None,
+    apktool_path_str: Optional[str] = None,
+    status_callback: Optional[Callable[[str, float], None]] = None,
+) -> Dict[str, Any]:
+    """
+    Direct function interface for UI callers
+    """
+    base_dir = Path(__file__).resolve().parent
+    apk_path = Path(apk_path_str).resolve()
+    
+    if output_dir_str:
+        output_dir = Path(output_dir_str).resolve()
+    else:
+        output_dir = base_dir / "output"
+        
+    if apktool_path_str:
+        apktool_path = Path(apktool_path_str).resolve()
+    else:
+        apktool_path = base_dir / "apktool.jar"
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    decompiled_dir = output_dir / "decoded"
+
+    if status_callback:
+        status_callback("Decompiling APK with Apktool...", 0.15)
+    
+    if decompiled_dir.exists():
+        shutil.rmtree(decompiled_dir)
+
+    run_apktool(apktool_path, apk_path, decompiled_dir)
+
+    manifest_path = decompiled_dir / "AndroidManifest.xml"
+    if not manifest_path.exists():
+        raise RuntimeError("Apktool completed, but AndroidManifest.xml was not generated.")
+
+    if status_callback:
+        status_callback("Parsing AndroidManifest.xml...", 0.45)
+    manifest = parse_manifest(manifest_path)
+
+    if status_callback:
+        status_callback("Analyzing APK file structure...", 0.65)
+    structure = analyze_apk_structure(apk_path, decompiled_dir)
+
+    if status_callback:
+        status_callback("Analyzing Smali bytecodes...", 0.85)
+    smali = analyze_smali(decompiled_dir)
+
+    report = build_analysis_report(
+        apk_path=apk_path,
+        decompiled_dir=decompiled_dir,
+        manifest=manifest,
+        smali=smali,
+        structure=structure,
+    )
+
+    report_path = output_dir / "apktool_analysis.json"
+    save_json(report, report_path)
+
+    manifest_copy_path = output_dir / "AndroidManifest.xml"
+    shutil.copy2(manifest_path, manifest_copy_path)
+
+    if status_callback:
+        status_callback("Analysis completed successfully!", 1.0)
+
+    return report
+
+
 def main() -> int:
     config_path = Path(__file__).resolve().parent / "config.json"
 
@@ -649,50 +719,11 @@ def main() -> int:
         config = load_config(config_path)
         apktool_path, apk_path, output_dir = validate_paths(config)
 
-        decompiled_dir = output_dir / "decoded"
-        if decompiled_dir.exists():
-            print(f"[*] Removing previous output: {decompiled_dir}")
-            shutil.rmtree(decompiled_dir)
-
-        print(f"[*] APK: {apk_path}")
-        print(f"[*] Output: {decompiled_dir}")
-        run_apktool(apktool_path, apk_path, decompiled_dir)
-
-        manifest_path = decompiled_dir / "AndroidManifest.xml"
-        if not manifest_path.exists():
-            raise RuntimeError("Apktool completed, but AndroidManifest.xml was not generated.")
-
-        print("[+] Parsing AndroidManifest.xml...")
-        manifest = parse_manifest(manifest_path)
-
-        print("[+] Analyzing APK structure...")
-        structure = analyze_apk_structure(apk_path, decompiled_dir)
-
-        print("[+] Analyzing Smali code...")
-        smali = analyze_smali(decompiled_dir)
-
-        report = build_analysis_report(
-            apk_path=apk_path,
-            decompiled_dir=decompiled_dir,
-            manifest=manifest,
-            smali=smali,
-            structure=structure,
+        run_analysis_pipeline(
+            apk_path_str=str(apk_path),
+            output_dir_str=str(output_dir),
+            apktool_path_str=str(apktool_path),
         )
-
-        report_path = output_dir / "apktool_analysis.json"
-        save_json(report, report_path)
-
-        manifest_copy_path = output_dir / "AndroidManifest.xml"
-        shutil.copy2(manifest_path, manifest_copy_path)
-
-        print()
-        print("[+] Analysis completed successfully.")
-        print(f"[+] Decoded APK: {decompiled_dir}")
-        print(f"[+] Manifest XML: {manifest_copy_path}")
-        print(f"[+] Final JSON report: {report_path}")
-        print(f"[+] Smali files: {smali['summary']['smali_file_count']}")
-        print(f"[+] Smali methods: {smali['summary']['method_count']}")
-
         return 0
 
     except (
