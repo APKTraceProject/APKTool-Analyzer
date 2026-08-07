@@ -644,25 +644,37 @@ def save_json(data: Dict[str, Any], output_path: Path) -> None:
 
 def run_analysis_pipeline(
     apk_path_str: str,
-    output_dir_str: Optional[str] = None,
-    apktool_path_str: Optional[str] = None,
+    output_dir_str: str,
+    apktool_path_str: str,
     status_callback: Optional[Callable[[str, float], None]] = None,
 ) -> Dict[str, Any]:
     """
-    Direct function interface for UI callers
+    Library entry point, called by APKTrace's main app (mainapp/main.py).
+
+    This function takes every path explicitly from the caller and never
+    reads this tool's own config.json - that file is only used by main()
+    below, for running this script directly/standalone:
+
+      - Run directly (`python apk_analyzer.py`) -> main() -> reads the
+        config.json sitting next to this file.
+      - Run through the APKTrace main app -> main app resolves apk/output/
+        apktool paths from ITS OWN config.json and calls this function with
+        them - this file's local config.json is never touched in that case.
+
+    If you're testing this script by itself, use main()/config.json instead
+    of calling this function with missing paths.
     """
-    base_dir = Path(__file__).resolve().parent
+    if not apk_path_str or not output_dir_str or not apktool_path_str:
+        raise ValueError(
+            "run_analysis_pipeline() requires apk_path_str, output_dir_str and "
+            "apktool_path_str - it does not fall back to apktool-analyzer's own "
+            "config.json. For a standalone run using that config.json, run "
+            "apk_analyzer.py directly instead."
+        )
+
     apk_path = Path(apk_path_str).resolve()
-    
-    if output_dir_str:
-        output_dir = Path(output_dir_str).resolve()
-    else:
-        output_dir = base_dir / "output"
-        
-    if apktool_path_str:
-        apktool_path = Path(apktool_path_str).resolve()
-    else:
-        apktool_path = base_dir / "apktool.jar"
+    output_dir = Path(output_dir_str).resolve()
+    apktool_path = Path(apktool_path_str).resolve()
 
     output_dir.mkdir(parents=True, exist_ok=True)
     decompiled_dir = output_dir / "decoded"
