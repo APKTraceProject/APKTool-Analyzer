@@ -129,15 +129,25 @@ def run_apktool(apktool_path: Path, apk_path: Path, output_path: Path) -> None:
     print("[+] Running Apktool...")
     print("[+] Command:", " ".join(command))
 
+    # apktool.bat launches java.exe, which by default shares this process's
+    # console window. On Windows, clicking/selecting text in that terminal
+    # ("QuickEdit Mode", on by default) pauses ALL console I/O until a key
+    # is pressed - which freezes this subprocess until the user notices and
+    # presses Enter/Escape in the terminal. CREATE_NO_WINDOW runs the child
+    # with no console at all, so it can never be paused this way.
+    creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
     try:
         result = subprocess.run(
             command,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
             check=False,
+            creationflags=creation_flags,
         )
     except FileNotFoundError as exc:
         if apktool_path.suffix.lower() == ".jar":
